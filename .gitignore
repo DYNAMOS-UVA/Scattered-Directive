@@ -41,3 +41,4 @@ datasets/*.csv
 
 *.drawio.bkp
 *.drawio.dtmp
+/dynamos_fabric_env
