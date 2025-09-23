@@ -27,7 +27,7 @@ definitions.bak
 *.vscode
 # Dependency directories (remove the comment below to include it)
 # vendor/
-
+    
 
 # Go workspace file
 go.work
@@ -39,3 +39,4 @@ datasets/*.csv
 *.drawio.bkp
 *.drawio.dtmp
 /dynamos_fabric_env
+.env
