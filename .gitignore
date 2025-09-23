@@ -28,6 +28,10 @@ definitions.bak
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+# the virtual env folder
+.dynamos_fabric_env/
+
+
 # Go workspace file
 go.work
 __debug_bin
