@@ -40,3 +40,4 @@ datasets/*.csv
 *.drawio.dtmp
 /dynamos_fabric_env
 .env
+fabric/fabric_config/ssh_config
