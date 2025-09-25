@@ -1,0 +1,206 @@
+import pandas as pd
+import numpy as np
+import sys
+import os
+import io
+import json
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import OrderedDict
+from sklearn.preprocessing import StandardScaler
+
+
+server_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-model\datasets\outcomeData.csv", delimiter=',')
+print(server_data.head())
+
+client1_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientoneData.csv", delimiter=',')
+client2_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clienttwoData.csv", delimiter=',')
+client3_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientthreeData.csv", delimiter=',')
+print(client1_data.head())
+print(client2_data.head())
+print(client3_data.head())
+
+# # Dummy data loading (replace with your CSV)
+# data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
+
+# # Simulate 3 clients, each with 4 features
+# client_features = [
+#     data.iloc[:, 0:4].values,   # Client 1: columns 0-3
+#     data.iloc[:, 4:8].values,   # Client 2: columns 4-7
+#     data.iloc[:, 8:12].values   # Client 3: columns 8-11
+# ]
+# labels = data["Survived"].values
+
+np.set_printoptions(threshold=sys.maxsize)  # To print full numpy arrays
+
+# note: to revert in production
+
+
+class ClientModel(nn.Module):
+    def __init__(self, input_size):
+        super().__init__()
+        self.fc = nn.Linear(input_size, 4)
+
+    def forward(self, x):
+        return self.fc(x)
+
+
+def serialise_array(array):
+    return json.dumps([
+        str(array.dtype),
+        array.tobytes().decode("latin1"),
+        array.shape])
+
+
+def deserialise_array(string, hook=None):
+    encoded_data = json.loads(string, object_pairs_hook=hook)
+    # logger.info(string, encoded_data)
+    dataType = np.dtype(encoded_data[0])
+    dataArray = np.frombuffer(encoded_data[1].encode("latin1"), dataType)
+
+    if len(encoded_data) > 2:
+        return dataArray.reshape(encoded_data[2])
+
+    return dataArray
+
+class VFLClient():
+    def __init__(self, data, learning_rate=0.01, model_state=None, optimiser_state=None):
+        self.data = torch.tensor(StandardScaler().fit_transform(data)).float()
+        self.model = ClientModel(data.shape[1])
+        if model_state is not None:
+            self.model.load_state_dict(model_state)
+
+        self.optimiser = None
+
+    def create_optimiser(self, learning_rate):
+        if self.optimiser is None:
+            self.optimiser = torch.optim.SGD(
+                self.model.parameters(), lr=learning_rate)
+
+    def train_model(self):
+        self.embedding = self.model(self.data)
+        return serialise_array(self.embedding.detach().numpy())
+
+    def gradient_descent(self, gradients):
+        if self.optimiser is None:
+            print("Optimiser is not defined.")
+            pass 
+
+        try:
+            self.model.zero_grad()
+            # embedding = self.model(self.data)
+            self.embedding.backward(torch.from_numpy(gradients))
+            self.optimiser.step()
+        except Exception as e:
+            print(f"Error occurred: {e}")
+
+
+class ServerModel(nn.Module):
+    def __init__(self, input_size):
+        super(ServerModel, self).__init__()
+        self.fc = nn.Linear(input_size, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.fc(x)
+        return self.sigmoid(x)
+
+
+class VFLServer():
+    def __init__(self, data):
+        self.model = ServerModel(12)
+        # self.initial_parameters = ndarrays_to_parameters(
+        #     [val.cpu().numpy()
+        #      for _, val in server_configuration.model.state_dict().items()]
+        # )
+        self.optimizer = optim.SGD(self.model.parameters(), lr=0.01)
+        self.criterion = nn.BCELoss()
+        self.labels = torch.tensor(
+            data["Survived"].values).float().unsqueeze(1)
+
+    def aggregate_fit(self, results):
+        global server_configuration
+
+        try:
+            embedding_results = [
+                torch.from_numpy(embedding.copy())
+                for embedding in results
+            ]
+        except Exception as e:
+            print(f"Converting the results to torch failed: {e}")
+
+        try:
+            embeddings_aggregated = torch.cat(embedding_results, dim=1)
+            embedding_server = embeddings_aggregated.detach().requires_grad_()
+            output = self.model(embedding_server)
+            loss = self.criterion(output, self.labels)
+            loss.backward()
+
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+        except Exception as e:
+            print(f"Running gradient descent failed: {e}")
+
+        try:
+            grads = embedding_server.grad.split([4, 4, 4], dim=1)
+            np_gradients = [serialise_array(grad.numpy()) for grad in grads]
+        except Exception as e:
+            print(f"Converting the gradients failed: {e}")
+
+        with torch.no_grad():
+            correct = 0
+            output = self.model(embedding_server)
+            predicted = (output > 0.5).float()
+
+            correct += (predicted == self.labels).sum().item()
+
+            accuracy = correct / len(self.labels) * 100
+
+        data = []
+        data.append({"accuracy": accuracy, "gradients": np_gradients})
+
+        print(f"Accuracy achieved: {accuracy}")
+
+        return data
+
+
+
+
+# define clients
+clientone = VFLClient(client1_data)
+clienttwo = VFLClient(client2_data)
+clientthree = VFLClient(client3_data)
+
+clients = [clientone, clienttwo, clientthree]
+
+
+vfl_server = VFLServer(server_data)
+
+
+# Training loop
+for round in range(100):
+    # 1. Clients compute embeddings
+
+    e1 = clientone.train_model()
+    e2 = clienttwo.train_model()
+    e3 = clientthree.train_model()
+    results = [e1, e2, e3]
+
+    # deserialise_array(embeddings[2])
+    deserialized_results = [deserialise_array(embedding) for embedding in results]
+
+    # 2. Server aggregates embeddings and returns accuracy and gradients
+    data = vfl_server.aggregate_fit(deserialized_results)
+
+    # print(data[-1].keys())
+    print(data[-1]['accuracy'])
+
+    gradients = data[-1]['gradients']
+
+    # 3. backpropagate gradients to clients
+
+    for i, vfl_client in enumerate(clients):
+        vfl_client.create_optimiser(0.05)
+
+        vfl_client.gradient_descent(deserialise_array(gradients[i]))
