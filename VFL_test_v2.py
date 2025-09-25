@@ -11,6 +11,13 @@ from collections import OrderedDict
 from sklearn.preprocessing import StandardScaler
 
 
+# ---------------------- SET SEED FOR REPRODUCIBILITY ----------------------
+SEED = 0
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+# --------------------------------------------------------------------------
+
+
 server_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-model\datasets\outcomeData.csv", delimiter=',')
 print(server_data.head())
 
@@ -25,9 +32,13 @@ print(client3_data.head())
 client_datasets = [client1_data, client3_data, client2_data]  
 
 NOF_CLIENTS = 3
-REMOVE_CLIENT_ROUND = 10  # remove one client after these rounds
-ADD_CLIENT_ROUND = 20  # add one client after these rounds
-ADD_CLIENT_CLEAN = False  # if True, reinstantiate the server when a client is added. Otherwise, just keep the client the way it is. It might be pretrained already.
+REMOVE_CLIENT_ROUND = 30  # remove one client after these rounds
+SHRINK_SERVER = True  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
+
+ADD_CLIENT_ROUND = 200000  # add one client after these rounds
+ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
+
+TOTAL_ROUNDS = 70
 
 # # Dummy data loading (replace with your CSV)
 # data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
@@ -102,6 +113,22 @@ class VFLClient():
             self.optimiser.step()
         except Exception as e:
             print(f"Error occurred: {e}")
+
+
+
+def shrink_server_model(old_model, new_input_size):
+    """
+    Creates a new ServerModel with fewer input neurons and copies over the trained weights
+    from the old model for the first new_input_size neurons.
+    """
+    # Create the new model
+    new_model = ServerModel(new_input_size)
+    # Copy weights: old_model.fc.weight shape: [1, old_input_size]
+    with torch.no_grad():
+        # Take only first new_input_size columns (neurons)
+        new_model.fc.weight[:, :] = old_model.fc.weight[:, :new_input_size]
+        new_model.fc.bias[:] = old_model.fc.bias[:]
+    return new_model
 
 
 class ServerModel(nn.Module):
@@ -187,7 +214,7 @@ vfl_server = VFLServer(server_data)
 
 
 # Training loop
-for round in range(70):
+for round in range(TOTAL_ROUNDS):
 
     print("--------------------------------------------------")
     print(f"Round {round+1}")
@@ -199,8 +226,17 @@ for round in range(70):
         else:
             print("Cannot remove more clients.")
 
-        print(f"Reinstantiating server for {NOF_CLIENTS}...")
-        vfl_server = VFLServer(server_data)
+        if SHRINK_SERVER:
+            print(f"Shrinking server model for {NOF_CLIENTS}...")
+            # Shrink the server model to match the new number of clients
+            old_model = vfl_server.model
+            # Each client outputs 4 features
+            vfl_server.model = shrink_server_model(old_model, 4*NOF_CLIENTS)
+        else:
+            print(f"Reinstantiating server for {NOF_CLIENTS}...")
+            vfl_server = VFLServer(server_data)
+        
+        
 
     if round == ADD_CLIENT_ROUND:
         if NOF_CLIENTS < 3:
