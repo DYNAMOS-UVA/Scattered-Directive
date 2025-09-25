@@ -24,7 +24,10 @@ print(client3_data.head())
 # I put the client 2 at the end so that it is excluded when NOF_CLIENTS=2. For demonstration purposes, because client 3 din't have a big effect.
 client_datasets = [client1_data, client3_data, client2_data]  
 
-NOF_CLIENTS = 2
+NOF_CLIENTS = 3
+REMOVE_CLIENT_ROUND = 10  # remove one client after these rounds
+ADD_CLIENT_ROUND = 20  # add one client after these rounds
+ADD_CLIENT_CLEAN = False  # if True, reinstantiate the server when a client is added. Otherwise, just keep the client the way it is. It might be pretrained already.
 
 # # Dummy data loading (replace with your CSV)
 # data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
@@ -173,20 +176,49 @@ class VFLServer():
 
 
 # define clients
-clients = []
+all_clients = []
 for client_data in client_datasets[:NOF_CLIENTS]:
     client = VFLClient(client_data)
-    clients.append(client)
+    all_clients.append(client)
 
+clients = all_clients[:NOF_CLIENTS] # the active clients
 
 vfl_server = VFLServer(server_data)
 
 
 # Training loop
-for round in range(100):
+for round in range(70):
+
     print("--------------------------------------------------")
     print(f"Round {round+1}")
-    # 1. Clients compute embeddings
+    if round == REMOVE_CLIENT_ROUND:
+        if NOF_CLIENTS > 1:
+            NOF_CLIENTS -= 1
+            clients.pop()  # remove the last client
+            print(f"Client removed. Number of clients is now {NOF_CLIENTS}.")
+        else:
+            print("Cannot remove more clients.")
+
+        print(f"Reinstantiating server for {NOF_CLIENTS}...")
+        vfl_server = VFLServer(server_data)
+
+    if round == ADD_CLIENT_ROUND:
+        if NOF_CLIENTS < 3:
+            NOF_CLIENTS += 1
+            
+            if ADD_CLIENT_CLEAN:
+                print(f"Reinstantiating client {NOF_CLIENTS-1}")
+                all_clients[NOF_CLIENTS-1] = VFLClient(client_datasets[NOF_CLIENTS-1])  # reinstantiate the client
+
+            clients.append(all_clients[NOF_CLIENTS-1])  # add the next client
+            print(f"Client added. Number of clients is now {NOF_CLIENTS}.")
+        else:
+            print("Cannot add more clients.")
+
+        print(f"Reinstantiating server for {NOF_CLIENTS}...")
+        vfl_server = VFLServer(server_data)
+
+    #  1. Clients compute embeddings
 
     results = []
     for client in clients:
