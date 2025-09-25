@@ -21,6 +21,11 @@ print(client1_data.head())
 print(client2_data.head())
 print(client3_data.head())
 
+# I put the client 2 at the end so that it is excluded when NOF_CLIENTS=2. For demonstration purposes, because client 3 din't have a big effect.
+client_datasets = [client1_data, client3_data, client2_data]  
+
+NOF_CLIENTS = 2
+
 # # Dummy data loading (replace with your CSV)
 # data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
 
@@ -109,7 +114,7 @@ class ServerModel(nn.Module):
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(12)
+        self.model = ServerModel(4 * NOF_CLIENTS)  # Assuming each client outputs 4 features
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
@@ -143,7 +148,7 @@ class VFLServer():
             print(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([4, 4, 4], dim=1)
+            grads = embedding_server.grad.split([4]*NOF_CLIENTS, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
             print(f"Converting the gradients failed: {e}")
@@ -168,11 +173,10 @@ class VFLServer():
 
 
 # define clients
-clientone = VFLClient(client1_data)
-clienttwo = VFLClient(client2_data)
-clientthree = VFLClient(client3_data)
-
-clients = [clientone, clienttwo, clientthree]
+clients = []
+for client_data in client_datasets[:NOF_CLIENTS]:
+    client = VFLClient(client_data)
+    clients.append(client)
 
 
 vfl_server = VFLServer(server_data)
@@ -180,12 +184,13 @@ vfl_server = VFLServer(server_data)
 
 # Training loop
 for round in range(100):
+    print("--------------------------------------------------")
+    print(f"Round {round+1}")
     # 1. Clients compute embeddings
 
-    e1 = clientone.train_model()
-    e2 = clienttwo.train_model()
-    e3 = clientthree.train_model()
-    results = [e1, e2, e3]
+    results = []
+    for client in clients:
+        results.append(client.train_model())
 
     # deserialise_array(embeddings[2])
     deserialized_results = [deserialise_array(embedding) for embedding in results]
@@ -204,3 +209,4 @@ for round in range(100):
         vfl_client.create_optimiser(0.05)
 
         vfl_client.gradient_descent(deserialise_array(gradients[i]))
+
