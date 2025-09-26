@@ -32,13 +32,15 @@ print(client3_data.head())
 client_datasets = [client1_data, client3_data, client2_data]  
 
 NOF_CLIENTS = 3
-REMOVE_CLIENT_ROUND = 30  # remove one client after these rounds
+REMOVE_CLIENT_ROUND = 40  # remove one client after these rounds
 SHRINK_SERVER = True  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
-ADD_CLIENT_ROUND = 200000  # add one client after these rounds
+ADD_CLIENT_ROUND = 140  # add one client after these rounds
 ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
 
-TOTAL_ROUNDS = 70
+TOTAL_ROUNDS = 220
+
+SERVER_CHECKPOINT_PATH = "server_state.pth"
 
 # # Dummy data loading (replace with your CSV)
 # data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
@@ -198,6 +200,21 @@ class VFLServer():
         print(f"Accuracy achieved: {accuracy}")
 
         return data
+    
+    def save_state(self, filepath):
+        """Save the state dicts for both model and optimizer to disk."""
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict()
+        }, filepath)
+        print(f"Server state saved to {filepath}")
+
+    def load_state(self, filepath):
+        """Load the state dicts for both model and optimizer from disk."""
+        state = torch.load(filepath)
+        self.model.load_state_dict(state['model_state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        print(f"Server state loaded from {filepath}")
 
 
 
@@ -213,6 +230,8 @@ clients = all_clients[:NOF_CLIENTS] # the active clients
 vfl_server = VFLServer(server_data)
 
 
+train_results = []
+
 # Training loop
 for round in range(TOTAL_ROUNDS):
 
@@ -225,6 +244,9 @@ for round in range(TOTAL_ROUNDS):
             print(f"Client removed. Number of clients is now {NOF_CLIENTS}.")
         else:
             print("Cannot remove more clients.")
+
+        print("Saving server state before modification...")
+        vfl_server.save_state(SERVER_CHECKPOINT_PATH)
 
         if SHRINK_SERVER:
             print(f"Shrinking server model for {NOF_CLIENTS}...")
@@ -251,8 +273,14 @@ for round in range(TOTAL_ROUNDS):
         else:
             print("Cannot add more clients.")
 
-        print(f"Reinstantiating server for {NOF_CLIENTS}...")
-        vfl_server = VFLServer(server_data)
+        if os.path.isfile(SERVER_CHECKPOINT_PATH):
+            
+            print("Loading server state before modification...")
+            vfl_server = VFLServer(server_data)  # clean server with the correct input size
+            vfl_server.load_state(SERVER_CHECKPOINT_PATH)
+        else:
+            print(f"Reinstantiating server for {NOF_CLIENTS}...")
+            vfl_server = VFLServer(server_data)
 
     #  1. Clients compute embeddings
 
@@ -277,4 +305,27 @@ for round in range(TOTAL_ROUNDS):
         vfl_client.create_optimiser(0.05)
 
         vfl_client.gradient_descent(deserialise_array(gradients[i]))
+    
 
+    train_results.append({
+        "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "train_round": round+1,
+        "accuracy": data[-1]['accuracy'],
+        "clients": NOF_CLIENTS
+    })
+
+payload = {
+    "metadata": {
+        "total_rounds": TOTAL_ROUNDS,
+        "REMOVE_CLIENT_ROUND": REMOVE_CLIENT_ROUND,
+        "SHRINK_SERVER": SHRINK_SERVER,
+        "ADD_CLIENT_ROUND": ADD_CLIENT_ROUND,
+        "ADD_CLIENT_CLEAN": ADD_CLIENT_CLEAN,
+    },
+    "results": train_results
+}
+
+filename = f"./run_dumps/vfl_test_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json"
+print(f"Saving to file {filename}")
+with open(filename, "w") as f:
+    json.dump(payload, f, indent=2)
