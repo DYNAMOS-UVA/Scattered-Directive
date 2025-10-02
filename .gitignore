@@ -41,3 +41,6 @@ datasets/*.csv
 /dynamos_fabric_env
 .env
 fabric/fabric_config/ssh_config
+/.idea
+/run_dumps
+server_state.pth
