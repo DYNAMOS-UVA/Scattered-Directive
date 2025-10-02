@@ -12,8 +12,12 @@ p3 = r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_re
 pp3 = r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_results_20250925_172426.json"
 ppp3 = r'C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_results_20250925_172653.json'
 
+merged_path = r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_results_20251002_145945.json"
+reg_p = r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_results_20251002_150611.json"
+reg_p = r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\run_dumps\vfl_test_results_20251002_150801.json"
+
 # Load the JSON results file
-with open(ppp3, 'r') as f:
+with open(merged_path, 'r') as f:
     data = json.load(f)
 
 results = data['results']

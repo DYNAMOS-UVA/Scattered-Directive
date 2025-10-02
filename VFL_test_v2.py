@@ -18,12 +18,12 @@ torch.manual_seed(SEED)
 # --------------------------------------------------------------------------
 
 
-server_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-model\datasets\outcomeData.csv", delimiter=',')
+server_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-model\datasets\outcomeData.csv", delimiter=',', index_col=0)
 print(server_data.head())
 
-client1_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientoneData.csv", delimiter=',')
-client2_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clienttwoData.csv", delimiter=',')
-client3_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientthreeData.csv", delimiter=',')
+client1_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientoneData.csv", delimiter=',', index_col=0)
+client2_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clienttwoData.csv", delimiter=',', index_col=0)
+client3_data = pd.read_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train\datasets\clientthreeData.csv", delimiter=',', index_col=0)
 print(client1_data.head())
 print(client2_data.head())
 print(client3_data.head())
@@ -32,10 +32,10 @@ print(client3_data.head())
 client_datasets = [client1_data, client3_data, client2_data]  
 
 NOF_CLIENTS = 3
-REMOVE_CLIENT_ROUND = 40  # remove one client after these rounds
+REMOVE_CLIENT_ROUND = -1  # remove one client after these rounds
 SHRINK_SERVER = True  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
-ADD_CLIENT_ROUND = 140  # add one client after these rounds
+ADD_CLIENT_ROUND = -1  # add one client after these rounds
 ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
 
 TOTAL_ROUNDS = 220
