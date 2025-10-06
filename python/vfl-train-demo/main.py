@@ -6,6 +6,7 @@ import io
 import json
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import OrderedDict
 from sklearn.preprocessing import StandardScaler
 from google.protobuf.struct_pb2 import Struct
@@ -41,6 +42,9 @@ wait_for_setup_condition = threading.Condition()
 
 ms_config = None
 
+DEFAULT_LEARNING_RATE = 0.1 
+DEFAULT_WEIGHT_DECAY = 1e-4
+
 # --- END DYNAMOS Interface code At the TOP ----------------------
 
 # ---- LOCAL TEST SETUP OPTIONAL!
@@ -75,10 +79,17 @@ def load_data(file_path):
 class ClientModel(nn.Module):
     def __init__(self, input_size):
         super().__init__()
-        self.fc = nn.Linear(input_size, 4)
+        # Layer 1: Input features -> Hidden layer (e.g., 64 neurons)
+        self.fc1 = nn.Linear(input_size, 64)
+        # Layer 2: Hidden layer -> Output embedding (8 neurons)
+        self.fc2 = nn.Linear(64, 8)
+        self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
-        return self.fc(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 
 def serialise_array(array):
@@ -101,8 +112,9 @@ def deserialise_array(string, hook=None):
 
 
 class VFLClient():
-    def __init__(self, data, learning_rate=0.01, model_state=None, optimiser_state=None):
-        self.data = torch.tensor(StandardScaler().fit_transform(data)).float()
+    def __init__(self, data, learning_rate=DEFAULT_LEARNING_RATE, model_state=None, optimiser_state=None):
+        self.data = torch.tensor(data.values, dtype=torch.float32)
+        
         self.model = ClientModel(data.shape[1])
         if model_state is not None:
             self.model.load_state_dict(model_state)
@@ -111,8 +123,7 @@ class VFLClient():
 
     def create_optimiser(self, learning_rate):
         if self.optimiser is None:
-            self.optimiser = torch.optim.SGD(
-                self.model.parameters(), lr=learning_rate)
+            self.optimiser = torch.optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=DEFAULT_WEIGHT_DECAY)   #  torch.optim.SGD(self.model.parameters(), lr=learning_rate)
 
     def train_model(self):
         self.embedding = self.model(self.data)
@@ -200,7 +211,7 @@ def request_handler(msComm: msCommTypes.MicroserviceCommunication,
                     learning_rate = request.data["learning_rate"].number_value
                     vfl_client.create_optimiser(learning_rate)
                 except Exception:
-                    vfl_client.create_optimiser(0.05)
+                    vfl_client.create_optimiser(DEFAULT_LEARNING_RATE)
 
                 try:
                     gradients = request.data["gradients"].string_value

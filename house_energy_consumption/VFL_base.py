@@ -94,19 +94,15 @@ np.set_printoptions(threshold=sys.maxsize)  # To print full numpy arrays
 class ClientModel(nn.Module):
     def __init__(self, input_size):
         super().__init__()
-        # Define the layers
         # Layer 1: Input features -> Hidden layer (e.g., 64 neurons)
         self.fc1 = nn.Linear(input_size, 64*neurons_multiplier)
-        # Layer 2: Hidden layer -> Output embedding (4 neurons)
+        # Layer 2: Hidden layer -> Output embedding (8 neurons)
         self.fc2 = nn.Linear(64*neurons_multiplier, 8*neurons_multiplier)
         self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
-        # Define the forward pass
-        # Pass through the first layer, then apply ReLU activation
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
-        # Pass through the second layer to get the final embedding
         x = self.fc2(x)
         return x
 
