@@ -32,6 +32,14 @@ client1_data = data.iloc[:, :cols_per_client]
 client2_data = data.iloc[:, cols_per_client : 2 * cols_per_client]
 client3_data = data.iloc[:, 2 * cols_per_client:]
 
+# save data to file 
+# client1_data.to_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-demo\datasets\clientoneData.csv", index=False)
+# client2_data.to_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-demo\datasets\clienttwoData.csv", index=False)
+# client3_data.to_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-demo\datasets\clientthreeData.csv", index=False)
+
+server_data.to_csv(r"C:\Users\alkou\Documents\GitHub\Scattered-Directive\python\vfl-train-model-demo\datasets\outcomeData.csv", index=False)
+
+
 print(client1_data.head())
 print(client2_data.head())
 print(client3_data.head())
