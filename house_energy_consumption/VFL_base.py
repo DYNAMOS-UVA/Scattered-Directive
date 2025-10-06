@@ -38,8 +38,8 @@ print(client3_data.head())
 
 
 # I put the client 2 at the end so that it is excluded when NOF_CLIENTS=2. For demonstration purposes, because client 3 din't have a big effect.
-client_datasets = [client1_data, client2_data, client3_data]  
-# client_datasets = [data]  
+# client_datasets = [client1_data, client2_data, client3_data]  
+client_datasets = [data]  
 
 # sanity check that they have the same indices
 client1_data.index.equals(server_data.index)
@@ -50,7 +50,7 @@ client1_data.index.equals(server_data.index)
 # print(merged.columns)
 # client_datasets = [merged]
 
-NOF_CLIENTS = 3
+NOF_CLIENTS = 1
 REMOVE_CLIENT_ROUND = -1  # remove one client after these rounds
 SHRINK_SERVER = True  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
@@ -64,6 +64,8 @@ TOTAL_ROUNDS = 200
 SERVER_CHECKPOINT_PATH = "house_energy_consumption/save_point/server_state.pth"
 
 LEARNING_RATE = 0.1
+
+neurons_multiplier = 3
 
 # # Dummy data loading (replace with your CSV)
 # data = pd.read_csv("your_data.csv")  # should contain features for all clients + 'Survived' label
@@ -86,9 +88,9 @@ class ClientModel(nn.Module):
         super().__init__()
         # Define the layers
         # Layer 1: Input features -> Hidden layer (e.g., 64 neurons)
-        self.fc1 = nn.Linear(input_size, 64)
+        self.fc1 = nn.Linear(input_size, 64*neurons_multiplier)
         # Layer 2: Hidden layer -> Output embedding (4 neurons)
-        self.fc2 = nn.Linear(64, 8)
+        self.fc2 = nn.Linear(64*neurons_multiplier, 8*neurons_multiplier)
         self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):
@@ -201,7 +203,7 @@ class ServerModel(nn.Module):
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(8 * NOF_CLIENTS)  # Assuming each client outputs 4 features
+        self.model = ServerModel(8 * NOF_CLIENTS * neurons_multiplier)  # Assuming each client outputs 4 features
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
@@ -235,7 +237,7 @@ class VFLServer():
             print(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([8]*NOF_CLIENTS, dim=1)
+            grads = embedding_server.grad.split([8*neurons_multiplier]*NOF_CLIENTS, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
             print(f"Converting the gradients failed: {e}")
@@ -331,7 +333,7 @@ for round in range(TOTAL_ROUNDS):
             # Shrink the server model to match the new number of clients
             old_model = vfl_server.model
             # Each client outputs 4 features
-            vfl_server.model = shrink_server_model(old_model, 8*NOF_CLIENTS)
+            vfl_server.model = shrink_server_model(old_model, 8*NOF_CLIENT*neurons_multiplier)
         else:
             print(f"Reinstantiating server for {NOF_CLIENTS}...")
             vfl_server = VFLServer(server_data)
