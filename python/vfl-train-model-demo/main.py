@@ -6,6 +6,7 @@ import json
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from google.protobuf.struct_pb2 import Struct
 from dynamos.ms_init import NewConfiguration
 from dynamos.signal_flow import signal_continuation, signal_wait
@@ -53,6 +54,9 @@ vfl_server = None
 # --------------------------------
 
 
+DEFAULT_LEARNING_RATE = 0.1 
+NOF_CLIENTS = 3  # TODO: make it dynamic 
+
 def load_data(file_path):
     DATA_STEWARD_NAME = os.getenv("DATA_STEWARD_NAME").lower()
 
@@ -93,25 +97,32 @@ def deserialise_array(string, hook=None):
 class ServerModel(nn.Module):
     def __init__(self, input_size):
         super(ServerModel, self).__init__()
-        self.fc = nn.Linear(input_size, 1)
-        self.sigmoid = nn.Sigmoid()
+        hidden_size = 16 # A small hidden layer 
+
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, 1)
+        # Optional dropout 
+        # self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x):
-        x = self.fc(x)
-        return self.sigmoid(x)
+        x = F.relu(self.fc1(x))
+        # Optional dropout
+        # x = self.dropout(x)
+        x = self.fc2(x)
+        return x
 
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(12)
+        self.model = ServerModel(8 * NOF_CLIENTS)  # Assuming each client outputs 4 features
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
         # )
-        self.optimizer = optim.SGD(self.model.parameters(), lr=0.01)
-        self.criterion = nn.BCELoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+        self.criterion = nn.MSELoss()
         self.labels = torch.tensor(
-            data["Survived"].values).float().unsqueeze(1)
+            data["REL_TOTALBTU"].values).float().unsqueeze(1)
 
     def aggregate_fit(self, results):
         global server_configuration
@@ -137,26 +148,56 @@ class VFLServer():
             logger.info(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([4, 4, 4], dim=1)
+            grads = embedding_server.grad.split([8]*NOF_CLIENTS, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
             logger.info(f"Converting the gradients failed: {e}")
 
         with torch.no_grad():
-            correct = 0
             output = self.model(embedding_server)
-            predicted = (output > 0.5).float()
 
-            correct += (predicted == self.labels).sum().item()
+            mse = nn.MSELoss()(output, self.labels).item()
+            rmse = torch.sqrt(torch.tensor(mse)).item()
+            mae = nn.L1Loss()(output, self.labels).item()
+            total_sum_of_squares = torch.sum((self.labels - self.labels.mean()) ** 2)
+            residual_sum_of_squares = torch.sum((self.labels - output) ** 2)
+            r2 = 1 - (residual_sum_of_squares / total_sum_of_squares)
+            r2_score = r2.item()
 
-            accuracy = correct / len(self.labels) * 100
+            metrics = {
+                "mse": mse,
+                "rmse": rmse,
+                "mae": mae,
+                "r2": r2_score
+            }
+            # Example of printing the metrics
+            # print(f"Regression Metrics - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R²: {r2_score:.4f}")
+            pass 
+
 
         data = Struct()
-        data.update({"accuracy": accuracy, "gradients": np_gradients})
+        data.update({"accuracy": r2_score, "gradients": np_gradients})  # TODO: maybe try to rename the field
+        # data = []
+        # data.append({"r2": r2_score, "gradients": np_gradients})
 
-        logger.info(f"Accuracy achieved: {accuracy}")
+        logger.info(f"R2 achieved: {r2_score}")
 
         return data
+    
+    def save_state(self, filepath):
+        """Save the state dicts for both model and optimizer to disk."""
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict()
+        }, filepath)
+        print(f"Server state saved to {filepath}")
+
+    def load_state(self, filepath):
+        """Load the state dicts for both model and optimizer from disk."""
+        state = torch.load(filepath)
+        self.model.load_state_dict(state['model_state_dict'])
+        self.optimizer.load_state_dict(state['optimizer_state_dict'])
+        print(f"Server state loaded from {filepath}")
 
 
 def handleAggregateRequest(msComm):
