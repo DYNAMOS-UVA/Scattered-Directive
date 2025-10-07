@@ -81,7 +81,11 @@ brew install etcd
 
 echo -e "127.0.0.1 api-gateway.api-gateway.svc.cluster.local" | sudo tee -a /etc/hosts
 
-git clone https://github.com/Javernus/DYNAMOS.git
+# git clone https://github.com/Javernus/DYNAMOS.git
+git clone https://github.com/DYNAMOS-UVA/Scattered-Directive
+
+# rename to DYNAMOS 
+mv Scattered-Directive/ DYNAMOS 
 
 # curl -H "Host: api-gateway.api-gateway.svc.cluster.local" http://10.145.6.3:31813/api/v1/requestApproval \
 # --header 'Content-Type: application/json' \

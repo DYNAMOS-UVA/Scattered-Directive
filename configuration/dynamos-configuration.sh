@@ -18,7 +18,7 @@ api_gw_chart="${charts_path}/api-gateway"
 # Config
 config_path="${DYNAMOS_ROOT}/configuration"
 k8s_service_files="${config_path}/k8s_service_files"
-etcd_launch_files="${config_path}/etcd_launch_files"
+# etcd_launch_files="${config_path}/etcd_launch_files"  # I think this is unused now 
 
 rabbit_definitions_file="${k8s_service_files}/definitions.json"
 example_definitions_file="${k8s_service_files}/definitions_example.json"
