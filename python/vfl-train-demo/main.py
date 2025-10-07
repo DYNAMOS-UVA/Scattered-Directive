@@ -82,7 +82,7 @@ class ClientModel(nn.Module):
         # Layer 1: Input features -> Hidden layer (e.g., 64 neurons)
         self.fc1 = nn.Linear(input_size, 64)
         # Layer 2: Hidden layer -> Output embedding (8 neurons)
-        self.fc2 = nn.Linear(64, 8)
+        self.fc2 = nn.Linear(64, 4)
         self.dropout = nn.Dropout(p=0.5)
 
     def forward(self, x):

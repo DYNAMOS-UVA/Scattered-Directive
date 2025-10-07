@@ -114,7 +114,7 @@ class ServerModel(nn.Module):
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(8 * NOF_CLIENTS)  # Assuming each client outputs 4 features
+        self.model = ServerModel(4 * NOF_CLIENTS)  # Assuming each client outputs 4 features
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
@@ -148,7 +148,7 @@ class VFLServer():
             logger.info(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([8]*NOF_CLIENTS, dim=1)
+            grads = embedding_server.grad.split([4]*NOF_CLIENTS, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
             logger.info(f"Converting the gradients failed: {e}")
