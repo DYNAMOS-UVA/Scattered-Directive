@@ -1,8 +1,10 @@
 SHELL := /bin/bash
-targets := sql-query vfl-train-model vfl-train
+targets := sql-query vfl-train-model vfl-train vfl-train-demo vfl-train-model-demo
 datasets := "../configuration/datasets/"
 branch_name := $(shell git rev-parse --abbrev-ref HEAD)
-dockerhub_account := javernus
+dockerhub_account := dynamos1
+PUSH ?= 1
+#  default is 1 (do push to dockerhub) (the mechanism is a bit problematic because it reads whitespaces, so be careful)
 
 .PHONY: proto $(targets) dynamos
 
@@ -29,7 +31,8 @@ $(targets): proto
 	BASE=$$(basename $$WHEEL_NAME); \
 	docker build --platform linux/amd64 --build-arg NAME=$@ -t $(dockerhub_account)/$@:$(branch_name) --build-arg WHEEL_NAME=$$BASE -t $(dockerhub_account)/$@:latest ./$@/
 
-	# Push to Docker
-	docker push $(dockerhub_account)/$@:$(branch_name)
-	docker push $(dockerhub_account)/$@:latest
+	if [ "$(PUSH)" = "1" ]; then \
+		docker push $(dockerhub_account)/$@:$(branch_name); \
+		docker push $(dockerhub_account)/$@:latest; \
+	fi
 all: all $(targets) $(proto)
