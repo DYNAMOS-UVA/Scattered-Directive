@@ -143,8 +143,8 @@ func deployJob(ctx context.Context, msChain []mschain.MicroserviceMetadata, jobN
 
 		repositoryName := os.Getenv("MICROSERVICE_REPOSITORY_NAME")
 		if repositoryName == "" {
-			repositoryName = "javernus"  # TODO: change this 
-		}
+			repositoryName = "dynamos1"  // note: I changed this  
+		}  
 
 		fullImage := fmt.Sprintf("%s/%s:%s", repositoryName, microservice.Name, microserviceTag)
 		logger.Sugar().Debugf("FullImage name: %s", fullImage)

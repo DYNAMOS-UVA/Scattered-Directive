@@ -29,6 +29,8 @@
 #         env:
 #         - name: DATA_STEWARD_NAME
 #           value: %WORKER%
+#         - name: MICROSERVICE_REPOSITORY_NAME
+#           value: dynamos1
 #         - name: OC_AGENT_HOST
 #           value: {{ .Values.tracingEndpoint }}
 #       - name: sidecar
