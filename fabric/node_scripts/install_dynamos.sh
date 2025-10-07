@@ -48,7 +48,8 @@ function addPathExport () {
 }
 
 # Install CLI
-curl --proto '=https' --tlsv1.2 -sSfL https://run.linkerd.io/install-edge | sh
+curl --proto '=https' --tlsv1.2 -sSfL https://run.linkerd.io/install-edge | LINKERD2_VERSION=edge-25.8.1 sh
+# curl --proto '=https' --tlsv1.2 -sSfL https://run.linkerd.io/install-edge | sh
 
 # Add Linkerd to PATH
 addPathExport "\$PATH:/home/ubuntu/.linkerd2/bin"
