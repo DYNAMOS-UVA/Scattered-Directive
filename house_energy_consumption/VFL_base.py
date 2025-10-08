@@ -10,6 +10,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
 
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.DEBUG)
 
 # ---------------------- SET SEED FOR REPRODUCIBILITY ----------------------
 SEED = 0
@@ -58,20 +62,21 @@ client1_data.index.equals(server_data.index)
 # print(merged.columns)
 # client_datasets = [merged]
 
-NOF_CLIENTS = 3
-REMOVE_CLIENT_ROUND = -1  # remove one client after these rounds
-SHRINK_SERVER = True  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
+DEFAULT_NOF_CLIENTS = 3
+REMOVE_CLIENT_ROUND = 10  # remove one client after these rounds
+SHRINK_SERVER = False  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
-ADD_CLIENT_ROUND = -1  # add one client after these rounds
-ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
+ADD_CLIENT_ROUND = 20  # add one client after these rounds
+ADD_CLIENT_CLEAN = True  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
 
-TOTAL_ROUNDS = 200  
+TOTAL_ROUNDS = 50
 # with one client and one FC layer it takes about 2000 rounds to converge
 # with one client and two FC layers it takes about 200 rounds to converge
 
 SERVER_CHECKPOINT_PATH = "house_energy_consumption/save_point/server_state.pth"
 
 LEARNING_RATE = 0.1
+DEFAULT_LEARNING_RATE = 0.1
 
 neurons_multiplier = 1
 
@@ -209,18 +214,67 @@ class ServerModel(nn.Module):
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(4 * NOF_CLIENTS * neurons_multiplier)  # Assuming each client outputs 4 features
+        self.intermediate_neurons = 4  # Assuming each client outputs 4 features
+        self.nof_clients = DEFAULT_NOF_CLIENTS
+        self.model = ServerModel(self.intermediate_neurons * self.nof_clients) 
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
         # )
-        self.optimizer = optim.Adam(self.model.parameters(), lr=LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
         self.criterion = nn.MSELoss()
         self.labels = torch.tensor(
             data["REL_TOTALBTU"].values).float().unsqueeze(1)
+    
+    def shrink_server_model(self, new_nof_clients):
+        """
+        Creates a new ServerModel with fewer input neurons and copies over the trained weights
+        from the old model for the first new_input_size neurons.
+        """
+        self.nof_clients = new_nof_clients
+        # Create the new model
+        # note: this is a completely new model with random weights
+        self.model = ServerModel(self.intermediate_neurons * new_nof_clients)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+
+    
+    def expand_server_model(self, new_nof_clients):
+        """
+        Creates a new ServerModel with fewer input neurons and copies over the trained weights
+        from the old model for the first new_input_size neurons.
+        """
+        self.nof_clients = new_nof_clients
+        # Create the new model
+        # note: this is a completely new model with random weights
+        self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+    
+    def update_server_model_architecture(self, old_nof_clients, new_nof_clients):
+        if new_nof_clients == old_nof_clients:
+            # No change needed
+            logger.debug("Number of clients unchanged, no model architecture update needed.")
+        
+        if new_nof_clients < old_nof_clients:
+            logger.info(f"Number of clients decreased from {old_nof_clients} to {new_nof_clients}, shrinking model.")
+            self.shrink_server_model(new_nof_clients)
+        
+        if new_nof_clients > old_nof_clients:
+            logger.info(f"Number of clients increased from {old_nof_clients} to {new_nof_clients}, expanding model.")
+            self.expand_server_model(new_nof_clients)
+
 
     def aggregate_fit(self, results):
         global server_configuration
+
+        # infer the number of clients based on the data received
+        new_nof_clients = len(results)
+        if new_nof_clients != self.nof_clients:
+            print(f"Number of clients in results: {new_nof_clients}")
+            print(f"Current number of clients: {self.nof_clients}")
+            logger.info(f"Number of clients {new_nof_clients} does not match expected {self.nof_clients}, updating server architecture...")
+            # TODO: update the architecture of the model
+            self.update_server_model_architecture(self.nof_clients, new_nof_clients)
+
 
         try:
             embedding_results = [
@@ -228,7 +282,7 @@ class VFLServer():
                 for embedding in results
             ]
         except Exception as e:
-            print(f"Converting the results to torch failed: {e}")
+            logger.info(f"Converting the results to torch failed: {e}")
 
         try:
             embeddings_aggregated = torch.cat(embedding_results, dim=1)
@@ -240,15 +294,13 @@ class VFLServer():
             self.optimizer.step()
             self.optimizer.zero_grad()
         except Exception as e:
-            print(f"Running gradient descent failed: {e}")
+            logger.info(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([4*neurons_multiplier]*NOF_CLIENTS, dim=1)
+            grads = embedding_server.grad.split([4]*self.nof_clients, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
-            print(f"Converting the gradients failed: {e}")
-
-
+            logger.info(f"Converting the gradients failed: {e}")
 
         with torch.no_grad():
             output = self.model(embedding_server)
@@ -267,25 +319,17 @@ class VFLServer():
                 "mae": mae,
                 "r2": r2_score
             }
-
             # Example of printing the metrics
-            print(f"Regression Metrics - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R²: {r2_score:.4f}")
-        
-        # with torch.no_grad():
-        #     correct = 0
-        #     output = self.model(embedding_server)
-        #     predicted = (output > 0.5).float()
-
-        #     correct += (predicted == self.labels).sum().item()
-
-        #     accuracy = correct / len(self.labels) * 100
+            # print(f"Regression Metrics - MSE: {mse:.4f}, RMSE: {rmse:.4f}, MAE: {mae:.4f}, R²: {r2_score:.4f}")
+            pass 
 
 
-
+        # data = Struct()
+        # data.update({"accuracy": r2_score, "gradients": np_gradients})  # TODO: maybe try to rename the field
         data = []
         data.append({"r2": r2_score, "gradients": np_gradients})
 
-        print(f"R² achieved: {r2_score}")
+        logger.info(f"R2 achieved: {r2_score}")
 
         return data
     
@@ -307,11 +351,11 @@ class VFLServer():
 
 # define clients
 all_clients = []
-for client_data in client_datasets[:NOF_CLIENTS]:
+for client_data in client_datasets[:DEFAULT_NOF_CLIENTS]:
     client = VFLClient(client_data)
     all_clients.append(client)
 
-clients = all_clients[:NOF_CLIENTS] # the active clients
+clients = all_clients[:DEFAULT_NOF_CLIENTS] # the active clients
 
 vfl_server = VFLServer(server_data)
 
@@ -324,49 +368,51 @@ for round in range(TOTAL_ROUNDS):
     print("--------------------------------------------------")
     print(f"Round {round+1}")
     if round == REMOVE_CLIENT_ROUND:
-        if NOF_CLIENTS > 1:
-            NOF_CLIENTS -= 1
+        if DEFAULT_NOF_CLIENTS > 1:
+            DEFAULT_NOF_CLIENTS -= 1
             clients.pop()  # remove the last client
-            print(f"Client removed. Number of clients is now {NOF_CLIENTS}.")
+            print(f"Client removed. Number of clients is now {DEFAULT_NOF_CLIENTS}.")
         else:
             print("Cannot remove more clients.")
 
         print("Saving server state before modification...")
         vfl_server.save_state(SERVER_CHECKPOINT_PATH)
 
-        if SHRINK_SERVER:
-            print(f"Shrinking server model for {NOF_CLIENTS}...")
-            # Shrink the server model to match the new number of clients
-            old_model = vfl_server.model
-            # Each client outputs 4 features
-            vfl_server.model = shrink_server_model(old_model, 4*NOF_CLIENT*neurons_multiplier)
-        else:
-            print(f"Reinstantiating server for {NOF_CLIENTS}...")
-            vfl_server = VFLServer(server_data)
+        print("server resize should happen automatically now")
+
+        # if SHRINK_SERVER:
+        #     print(f"Shrinking server model for {DEFAULT_NOF_CLIENTS}...")
+        #     # Shrink the server model to match the new number of clients
+        #     old_model = vfl_server.model
+        #     # Each client outputs 4 features
+        #     vfl_server.model = shrink_server_model(old_model, 4*DEFAULT_NOF_CLIENTS*neurons_multiplier)
+        # else:
+        #     print(f"Reinstantiating server for {DEFAULT_NOF_CLIENTS}...")
+        #     vfl_server = VFLServer(server_data)
         
         
 
     if round == ADD_CLIENT_ROUND:
-        if NOF_CLIENTS < 3:
-            NOF_CLIENTS += 1
+        if DEFAULT_NOF_CLIENTS < 3:
+            DEFAULT_NOF_CLIENTS += 1
             
             if ADD_CLIENT_CLEAN:
-                print(f"Reinstantiating client {NOF_CLIENTS-1}")
-                all_clients[NOF_CLIENTS-1] = VFLClient(client_datasets[NOF_CLIENTS-1])  # reinstantiate the client
+                print(f"Reinstantiating client {DEFAULT_NOF_CLIENTS-1}")
+                all_clients[DEFAULT_NOF_CLIENTS-1] = VFLClient(client_datasets[DEFAULT_NOF_CLIENTS-1])  # reinstantiate the client
 
-            clients.append(all_clients[NOF_CLIENTS-1])  # add the next client
-            print(f"Client added. Number of clients is now {NOF_CLIENTS}.")
+            clients.append(all_clients[DEFAULT_NOF_CLIENTS-1])  # add the next client
+            print(f"Client added. Number of clients is now {DEFAULT_NOF_CLIENTS}.")
         else:
             print("Cannot add more clients.")
 
-        if os.path.isfile(SERVER_CHECKPOINT_PATH):
-            
-            print("Loading server state before modification...")
-            vfl_server = VFLServer(server_data)  # clean server with the correct input size
-            vfl_server.load_state(SERVER_CHECKPOINT_PATH)
-        else:
-            print(f"Reinstantiating server for {NOF_CLIENTS}...")
-            vfl_server = VFLServer(server_data)
+        
+        # if os.path.isfile(SERVER_CHECKPOINT_PATH):
+        #     print("Loading server state before modification...")
+        #     vfl_server = VFLServer(server_data)  # clean server with the correct input size
+        #     vfl_server.load_state(SERVER_CHECKPOINT_PATH)
+        # else:
+        #     print(f"Reinstantiating server for {DEFAULT_NOF_CLIENTS}...")
+        #     vfl_server = VFLServer(server_data)
 
     #  1. Clients compute embeddings
 
@@ -397,7 +443,7 @@ for round in range(TOTAL_ROUNDS):
         "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
         "train_round": round+1,
         "accuracy": data[-1]['r2'],
-        "clients": NOF_CLIENTS
+        "clients": DEFAULT_NOF_CLIENTS
     })
 
 payload = {

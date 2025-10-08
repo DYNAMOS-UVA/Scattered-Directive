@@ -55,7 +55,7 @@ vfl_server = None
 
 
 DEFAULT_LEARNING_RATE = 0.1 
-NOF_CLIENTS = 3  # TODO: make it dynamic 
+DEFAULT_NOF_CLIENTS = 3  # TODO: make it dynamic 
 
 def load_data(file_path):
     DATA_STEWARD_NAME = os.getenv("DATA_STEWARD_NAME").lower()
@@ -114,7 +114,9 @@ class ServerModel(nn.Module):
 
 class VFLServer():
     def __init__(self, data):
-        self.model = ServerModel(4 * NOF_CLIENTS)  # Assuming each client outputs 4 features
+        self.intermediate_neurons = 4  # Assuming each client outputs 4 features
+        self.nof_clients = DEFAULT_NOF_CLIENTS
+        self.model = ServerModel(self.intermediate_neurons * self.nof_clients)  # Assuming each client outputs 4 features
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
@@ -123,9 +125,53 @@ class VFLServer():
         self.criterion = nn.MSELoss()
         self.labels = torch.tensor(
             data["REL_TOTALBTU"].values).float().unsqueeze(1)
+    
+    def shrink_server_model(self, new_nof_clients):
+        """
+        Creates a new ServerModel with fewer input neurons and copies over the trained weights
+        from the old model for the first new_input_size neurons.
+        """
+        self.nof_clients = new_nof_clients
+        # Create the new model
+        # note: this is a completely new model with random weights
+        self.model = ServerModel(self.intermediate_neurons * new_nof_clients)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+
+    
+    def expand_server_model(self, new_nof_clients):
+        """
+        Creates a new ServerModel with fewer input neurons and copies over the trained weights
+        from the old model for the first new_input_size neurons.
+        """
+        self.nof_clients = new_nof_clients
+        # Create the new model
+        # note: this is a completely new model with random weights
+        self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+    
+    def update_server_model_architecture(self, old_nof_clients, new_nof_clients):
+        if new_nof_clients == old_nof_clients:
+            # No change needed
+            logger.debug("Number of clients unchanged, no model architecture update needed.")
+        
+        if new_nof_clients < old_nof_clients:
+            logger.info(f"Number of clients decreased from {old_nof_clients} to {new_nof_clients}, shrinking model.")
+            self.shrink_server_model(new_nof_clients)
+        
+        if new_nof_clients > old_nof_clients:
+            logger.info(f"Number of clients increased from {old_nof_clients} to {new_nof_clients}, expanding model.")
+            self.expand_server_model(new_nof_clients)
+
 
     def aggregate_fit(self, results):
         global server_configuration
+
+        # infer the number of clients based on the data received
+        new_nof_clients = len(results)
+        if new_nof_clients != self.nof_clients:
+            logger.info(f"Number of clients {new_nof_clients} does not match expected {self.nof_clients}, updating server architecture...")
+            self.update_server_model_architecture(self.nof_clients, new_nof_clients)
+
 
         try:
             embedding_results = [
@@ -148,7 +194,7 @@ class VFLServer():
             logger.info(f"Running gradient descent failed: {e}")
 
         try:
-            grads = embedding_server.grad.split([4]*NOF_CLIENTS, dim=1)
+            grads = embedding_server.grad.split([4]*self.nof_clients, dim=1)
             np_gradients = [serialise_array(grad.numpy()) for grad in grads]
         except Exception as e:
             logger.info(f"Converting the gradients failed: {e}")
@@ -215,14 +261,6 @@ def handleAggregateRequest(msComm):
             embeddings.string_value) for embeddings in data.list_value.values]
     except Exception as e:
         logger.error(f"Errored when deserialising client data: {e}")
-
-    # TODO: Fetch model from PVC if not loaded yet
-    # try:
-    #     data = request.data["model_state"].string_value
-    #     clients_model_state += [data]
-    # except Exception as e:
-    #     logger.error(
-    #         f"Errored when deserialising client model state: {e}")
 
     # Hardcoded the number of clients for now
     data = vfl_server.aggregate_fit(clients_embeddings)
