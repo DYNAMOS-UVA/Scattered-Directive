@@ -14,7 +14,7 @@
   {
     "name": "vfl-train-model-demo",
     "label": "computeProvider",
-    "allowedOutputs": ["vfl-train"],
+    "allowedOutputs": ["vfl-train-demo"],
     "invalidArchetypes": []
   },
   {

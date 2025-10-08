@@ -199,6 +199,7 @@ def request_handler(msComm: msCommTypes.MicroserviceCommunication,
 
                 try:
                     embeddings = vfl_client.train_model()
+                    logger.debug(f"size of serialized array in bytes: {sys.getsizeof(embeddings)}")
                     data = Struct()
                     data.update({"embeddings":  embeddings})
                 except Exception as e:

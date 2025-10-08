@@ -209,6 +209,8 @@ def handleAggregateRequest(msComm):
 
     try:
         data = request.data["embeddings"]
+        logger.debug(f"Received data: {data}")
+        # logger.debug(f"Embedding len: {len(data)}")
         clients_embeddings = [deserialise_array(
             embeddings.string_value) for embeddings in data.list_value.values]
     except Exception as e:
