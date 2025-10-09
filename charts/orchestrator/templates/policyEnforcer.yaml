@@ -18,7 +18,7 @@ spec:
         kubernetes.io/hostname: {{ .Values.node }}
       containers:
       - name: policy-enforcer
-        image: {{ .Values.dockerArtifactAccount }}/policy-enforcer:{{ .Values.branchNameTag }}
+        image: dynamos1/policy-enforcer:{{ .Values.branchNameTag }}
         imagePullPolicy: Always
         env:
         - name: OC_AGENT_HOST

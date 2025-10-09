@@ -258,7 +258,8 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 
 	var cycles int64 = 10
 	var learning_rate float64 = 0.05
-	var change_policies int64 = -1
+	var policy_removal int64 = -1
+	var policy_reintroduction int64 = -1
 	var dataProviders []string = []string{}
 
 	data, ok := dataRequest["data"].(map[string]any)
@@ -276,10 +277,17 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			learning_rate = floatLearningRate
 		}
 
-		changePolicies, ok := data["change_policies"].(float64)
+		policyRemoval, ok := data["policy_removal"].(float64)
 		if ok {
-			change_policies = int64(changePolicies)
+			policy_removal = int64(policyRemoval)
 		}
+
+		reintroducePolicies, ok := data["policy_reintroduction"].(float64)
+		if ok {
+			policy_reintroduction = int64(reintroducePolicies)
+		}
+
+		logger.Sugar().Debug("policy_removal round: ", policy_removal, ", policy_reintroduction round: ", policy_reintroduction)
 	}
 
 	for auth, url := range authorizedProviders {
@@ -345,7 +353,7 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 		logger.Sugar().Info("Running VFL training round ", round)
 
 		// TODO: Implement policy change request
-		if change_policies == round {
+		if policy_removal == round {
 			logger.Sugar().Info("Sending in the policy change request, removing client 3 from the agreement.")
 			logger.Sugar().Info("TODO: Policy change request not yet implemented.")
 
@@ -366,6 +374,31 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			_, err = c.SendRequestApproval(ctx, policyUpdate)
 			if err != nil {
 				logger.Sugar().Warnf("error in sending/receiving policy removal: %v", err)
+			}
+		}
+
+		// TODO: Implement policy change request
+		if policy_reintroduction == round {
+			logger.Sugar().Info("Sending in the policy change request, reintroducing client 3 to the agreement.")
+			logger.Sugar().Info("TODO: Policy change request not yet implemented. (values are hardcoded)")
+
+			policyUpdate := &pb.RequestApproval{
+				Type:             "policyReintroduction",
+				User:             user,
+				DestinationQueue: "policyEnforcer-in",
+			}
+
+			// Create a channel to receive the response
+			responseChan := make(chan validation)
+
+			requestApprovalMutex.Lock()
+			requestApprovalMap[policyUpdate.User.Id] = responseChan
+			requestApprovalMutex.Unlock()
+
+			logger.Sugar().Info("- Sending policy reintroduction request")
+			_, err = c.SendRequestApproval(ctx, policyUpdate)
+			if err != nil {
+				logger.Sugar().Warnf("error in sending/receiving policy reintroduction: %v", err)
 			}
 		}
 
