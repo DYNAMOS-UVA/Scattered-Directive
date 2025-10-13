@@ -131,6 +131,9 @@ func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, 
 	responses := map[string]string{}
 
 	for auth, url := range clients {
+
+		logger.Sugar().Info("Sending training request to client: ", auth, " at url: ", url)
+
 		wg.Add(1)
 		target := strings.ToLower(auth)
 
@@ -181,11 +184,28 @@ func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, 
 	wg.Wait()
 
 	target := strings.ToLower(serverAuth)
+	logger.Sugar().Info("Sending training request to server: ", target, " at url: ", serverUrl)
+
 	endpoint := fmt.Sprintf("http://%s:8080/agent/v1/vflTrainRequest/%s", serverUrl, target)
 
 	dataRequest["type"] = "vflAggregateRequest"
+
+	// note: changed this to be dynamic based on the clients available
+	// dataRequest["data"] = map[string]any{
+	// 	"embeddings": []string{responses["clientone"], responses["clienttwo"], responses["clientthree"]},
+	// }
+	// Collect embeddings from all clients
+	embeddingList := []string{}
+	for approved_client := range clients {
+		if emb, ok := responses[strings.ToLower(approved_client)]; ok {
+			embeddingList = append(embeddingList, emb)
+		}
+	}
+
+	// Prepare data for aggregation
+	dataRequest["type"] = "vflAggregateRequest"
 	dataRequest["data"] = map[string]any{
-		"embeddings": []string{responses["clientone"], responses["clienttwo"], responses["clientthree"]},
+		"embeddings": embeddingList,
 	}
 
 	dataRequestJson, err := json.Marshal(dataRequest)
@@ -448,13 +468,48 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 				logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
 				return []byte{}
 			}
-
-			if msg.Error != "" || len(msg.AuthorizedProviders) != len(authorizedProviders) {
+			
+			if msg.Error != "" {
 				logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 				logger.Sugar().Info("   Policy does not allow this training to continue.")
 				logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 				break
 			}
+
+
+			// logger.Sugar().Debug("AuthorizedProviders from policy response: ", msg.AuthorizedProviders)
+			// logger.Sugar().Debug("AuthorizedProviders originally requested: ", authorizedProviders)
+			// logger.Sugar().Debug("Current clients before sync: ", clients)
+			if len(msg.AuthorizedProviders) != len(authorizedProviders) { 
+
+				// if len is different I can still allow training to continue with the authorised ones
+				// in that case remove the unauthorised ones from the clients map
+				// or add the authorised ones if they were not present before
+				for auth_provider := range authorizedProviders {
+					if _, ok := msg.AuthorizedProviders[auth_provider]; !ok {
+						logger.Sugar().Debug("Removing unauthorised provider: ", auth_provider, " from the training.")
+						delete(clients, auth_provider)
+					}
+				}
+			}
+
+			// maybe we can merge the above if into this one
+			if len(clients) != len(authorizedProviders) { 
+				// add newly authorised clients that are not yet in the clients map
+				for auth_provider, url := range authorizedProviders {
+					if strings.ToLower(auth_provider) != "server" {  // exclude server 
+						if _, ok := msg.AuthorizedProviders[auth_provider]; ok {
+							if _, exists := clients[auth_provider]; !exists {
+								logger.Sugar().Debug("Adding newly authorised provider: ", auth_provider, " to the training.")
+								clients[auth_provider] = url
+							}
+						}
+					}
+				}
+			}
+
+			logger.Sugar().Debug("Clients: ", clients)
+			
 
 			logger.Sugar().Info("- Sending training request")
 			accuracy, err := runVFLTrainingRound(dataRequest, clients, serverAuth, serverUrl, learning_rate)

@@ -63,13 +63,13 @@ client1_data.index.equals(server_data.index)
 # client_datasets = [merged]
 
 DEFAULT_NOF_CLIENTS = 3
-REMOVE_CLIENT_ROUND = 10  # remove one client after these rounds
+REMOVE_CLIENT_ROUND = 30  # remove one client after these rounds
 SHRINK_SERVER = False  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
-ADD_CLIENT_ROUND = 20  # add one client after these rounds
-ADD_CLIENT_CLEAN = True  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
+ADD_CLIENT_ROUND = 60  # add one client after these rounds
+ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
 
-TOTAL_ROUNDS = 50
+TOTAL_ROUNDS = 90
 # with one client and one FC layer it takes about 2000 rounds to converge
 # with one client and two FC layers it takes about 200 rounds to converge
 
