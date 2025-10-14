@@ -64,7 +64,7 @@ client1_data.index.equals(server_data.index)
 
 DEFAULT_NOF_CLIENTS = 3
 REMOVE_CLIENT_ROUND = 30  # remove one client after these rounds
-SHRINK_SERVER = False  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
+BACKTRACK = False  # if True, reinstantiate the server when a client is removed. Otherwise, keep the neurons the same, just fewer. Truncate the last neurons.
 
 ADD_CLIENT_ROUND = 60  # add one client after these rounds
 ADD_CLIENT_CLEAN = False  # if True, reinstantiate the added client. Otherwise, just keep the client the way it is. It might be pretrained already.
@@ -73,7 +73,7 @@ TOTAL_ROUNDS = 90
 # with one client and one FC layer it takes about 2000 rounds to converge
 # with one client and two FC layers it takes about 200 rounds to converge
 
-SERVER_CHECKPOINT_PATH = "house_energy_consumption/save_point/server_state.pth"
+SERVER_CHECKPOINT_PATH = "./server_state.pth"
 
 LEARNING_RATE = 0.1
 DEFAULT_LEARNING_RATE = 0.1
@@ -128,7 +128,7 @@ def deserialise_array(string, hook=None):
         return dataArray.reshape(encoded_data[2])
 
     return dataArray
-
+ 
 class VFLClient():
     def __init__(self, data, learning_rate=LEARNING_RATE, model_state=None, optimiser_state=None):
         # self.data = torch.tensor(StandardScaler().fit_transform(data)).float()  # in this case the dataset is already scaled
@@ -225,12 +225,16 @@ class VFLServer():
         self.criterion = nn.MSELoss()
         self.labels = torch.tensor(
             data["REL_TOTALBTU"].values).float().unsqueeze(1)
-    
-    def shrink_server_model(self, new_nof_clients):
+
+    def shrink_server_model(self, new_nof_clients, backtrack):
         """
         Creates a new ServerModel with fewer input neurons and copies over the trained weights
         from the old model for the first new_input_size neurons.
         """
+        if backtrack and new_nof_clients==2:  # for now hardcoded to work only when reducing size from 3 to 2 clients
+            # save model state to file
+            logger.info("Saving server state before shrinking...")
+            self.save_state(SERVER_CHECKPOINT_PATH)
         self.nof_clients = new_nof_clients
         # Create the new model
         # note: this is a completely new model with random weights
@@ -238,32 +242,39 @@ class VFLServer():
         self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
 
     
-    def expand_server_model(self, new_nof_clients):
+    def expand_server_model(self, new_nof_clients, backtrack):
         """
         Creates a new ServerModel with fewer input neurons and copies over the trained weights
         from the old model for the first new_input_size neurons.
         """
         self.nof_clients = new_nof_clients
-        # Create the new model
-        # note: this is a completely new model with random weights
-        self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+        if backtrack and self.nof_clients==3:  # for now hardcoded to work only for 3 clients
+            # save model state to file
+            self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+            logger.info("Loading previous server state...")
+            self.load_state(SERVER_CHECKPOINT_PATH)
+        else:
+            # Create the new model
+            # note: this is a completely new model with random weights
+            self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
     
-    def update_server_model_architecture(self, old_nof_clients, new_nof_clients):
+    def update_server_model_architecture(self, old_nof_clients, new_nof_clients, backtrack):
         if new_nof_clients == old_nof_clients:
             # No change needed
             logger.debug("Number of clients unchanged, no model architecture update needed.")
         
         if new_nof_clients < old_nof_clients:
             logger.info(f"Number of clients decreased from {old_nof_clients} to {new_nof_clients}, shrinking model.")
-            self.shrink_server_model(new_nof_clients)
+            self.shrink_server_model(new_nof_clients, backtrack)
         
         if new_nof_clients > old_nof_clients:
             logger.info(f"Number of clients increased from {old_nof_clients} to {new_nof_clients}, expanding model.")
-            self.expand_server_model(new_nof_clients)
+            self.expand_server_model(new_nof_clients, backtrack)
 
 
-    def aggregate_fit(self, results):
+    def aggregate_fit(self, results,backtrack=False):
         global server_configuration
 
         # infer the number of clients based on the data received
@@ -273,7 +284,7 @@ class VFLServer():
             print(f"Current number of clients: {self.nof_clients}")
             logger.info(f"Number of clients {new_nof_clients} does not match expected {self.nof_clients}, updating server architecture...")
             # TODO: update the architecture of the model
-            self.update_server_model_architecture(self.nof_clients, new_nof_clients)
+            self.update_server_model_architecture(self.nof_clients, new_nof_clients, backtrack)
 
 
         try:
@@ -375,8 +386,8 @@ for round in range(TOTAL_ROUNDS):
         else:
             print("Cannot remove more clients.")
 
-        print("Saving server state before modification...")
-        vfl_server.save_state(SERVER_CHECKPOINT_PATH)
+        # print("Saving server state before modification...")
+        # vfl_server.save_state(SERVER_CHECKPOINT_PATH)
 
         print("server resize should happen automatically now")
 
@@ -424,7 +435,7 @@ for round in range(TOTAL_ROUNDS):
     deserialized_results = [deserialise_array(embedding) for embedding in results]
 
     # 2. Server aggregates embeddings and returns accuracy and gradients
-    data = vfl_server.aggregate_fit(deserialized_results)
+    data = vfl_server.aggregate_fit(deserialized_results, backtrack=BACKTRACK)
 
     # print(data[-1].keys())
     # print(data[-1]['r2'])
@@ -450,14 +461,14 @@ payload = {
     "metadata": {
         "total_rounds": TOTAL_ROUNDS,
         "REMOVE_CLIENT_ROUND": REMOVE_CLIENT_ROUND,
-        "SHRINK_SERVER": SHRINK_SERVER,
+        "BACKTRACK": BACKTRACK,
         "ADD_CLIENT_ROUND": ADD_CLIENT_ROUND,
         "ADD_CLIENT_CLEAN": ADD_CLIENT_CLEAN,
     },
     "results": train_results
 }
 
-# filename = f"./run_dumps/house_energy_vfl_test_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json"
-# print(f"Saving to file {filename}")
-# with open(filename, "w") as f:
-#     json.dump(payload, f, indent=2)
+filename = f"./run_dumps/house_energy_vfl_test_results_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.json"
+print(f"Saving to file {filename}")
+with open(filename, "w") as f:
+    json.dump(payload, f, indent=2)

@@ -56,6 +56,7 @@ vfl_server = None
 
 DEFAULT_LEARNING_RATE = 0.1 
 DEFAULT_NOF_CLIENTS = 3  # TODO: make it dynamic 
+SERVER_CHECKPOINT_PATH = "server_checkpoint.pth"
 
 def load_data(file_path):
     DATA_STEWARD_NAME = os.getenv("DATA_STEWARD_NAME").lower()
@@ -116,7 +117,7 @@ class VFLServer():
     def __init__(self, data):
         self.intermediate_neurons = 4  # Assuming each client outputs 4 features
         self.nof_clients = DEFAULT_NOF_CLIENTS
-        self.model = ServerModel(self.intermediate_neurons * self.nof_clients)  # Assuming each client outputs 4 features
+        self.model = ServerModel(self.intermediate_neurons * self.nof_clients) 
         # self.initial_parameters = ndarrays_to_parameters(
         #     [val.cpu().numpy()
         #      for _, val in server_configuration.model.state_dict().items()]
@@ -125,12 +126,16 @@ class VFLServer():
         self.criterion = nn.MSELoss()
         self.labels = torch.tensor(
             data["REL_TOTALBTU"].values).float().unsqueeze(1)
-    
-    def shrink_server_model(self, new_nof_clients):
+
+    def shrink_server_model(self, new_nof_clients, backtrack):
         """
         Creates a new ServerModel with fewer input neurons and copies over the trained weights
         from the old model for the first new_input_size neurons.
         """
+        if backtrack and new_nof_clients==2:  # for now hardcoded to work only when reducing size from 3 to 2 clients
+            # save model state to file
+            logger.info("Saving server state before shrinking...")
+            self.save_state(SERVER_CHECKPOINT_PATH)
         self.nof_clients = new_nof_clients
         # Create the new model
         # note: this is a completely new model with random weights
@@ -138,39 +143,49 @@ class VFLServer():
         self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
 
     
-    def expand_server_model(self, new_nof_clients):
+    def expand_server_model(self, new_nof_clients, backtrack):
         """
         Creates a new ServerModel with fewer input neurons and copies over the trained weights
         from the old model for the first new_input_size neurons.
         """
         self.nof_clients = new_nof_clients
-        # Create the new model
-        # note: this is a completely new model with random weights
-        self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+        if backtrack and self.nof_clients==3:  # for now hardcoded to work only for 3 clients
+            # save model state to file
+            self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
+            logger.info("Loading previous server state...")
+            self.load_state(SERVER_CHECKPOINT_PATH)
+        else:
+            # Create the new model
+            # note: this is a completely new model with random weights
+            self.model = ServerModel(self.nof_clients * self.intermediate_neurons)
+            self.optimizer = optim.Adam(self.model.parameters(), lr=DEFAULT_LEARNING_RATE, weight_decay=1e-4)  # optim.SGD(self.model.parameters(), lr=0.01)
     
-    def update_server_model_architecture(self, old_nof_clients, new_nof_clients):
+    def update_server_model_architecture(self, old_nof_clients, new_nof_clients, backtrack):
         if new_nof_clients == old_nof_clients:
             # No change needed
             logger.debug("Number of clients unchanged, no model architecture update needed.")
         
         if new_nof_clients < old_nof_clients:
             logger.info(f"Number of clients decreased from {old_nof_clients} to {new_nof_clients}, shrinking model.")
-            self.shrink_server_model(new_nof_clients)
+            self.shrink_server_model(new_nof_clients, backtrack)
         
         if new_nof_clients > old_nof_clients:
             logger.info(f"Number of clients increased from {old_nof_clients} to {new_nof_clients}, expanding model.")
-            self.expand_server_model(new_nof_clients)
+            self.expand_server_model(new_nof_clients, backtrack)
 
 
-    def aggregate_fit(self, results):
+    def aggregate_fit(self, results,backtrack=False):
         global server_configuration
 
         # infer the number of clients based on the data received
         new_nof_clients = len(results)
         if new_nof_clients != self.nof_clients:
+            print(f"Number of clients in results: {new_nof_clients}")
+            print(f"Current number of clients: {self.nof_clients}")
             logger.info(f"Number of clients {new_nof_clients} does not match expected {self.nof_clients}, updating server architecture...")
-            self.update_server_model_architecture(self.nof_clients, new_nof_clients)
+            # TODO: update the architecture of the model
+            self.update_server_model_architecture(self.nof_clients, new_nof_clients, backtrack)
 
 
         try:
@@ -253,6 +268,17 @@ def handleAggregateRequest(msComm):
     request = rabbitTypes.Request()
     msComm.original_request.Unpack(request)
 
+    backtrack = False
+    try:
+        training_backtrack_flag = request.data["trainingBacktrack"]
+        logger.debug(f"Training backtrack flag: {training_backtrack_flag}")
+        logger.debug(f"Training backtrack flag: {type(training_backtrack_flag)}")
+        if training_backtrack_flag.number_value == 1:
+            backtrack = True
+            logger.debug(f"Training backtrack flag is 'True'")
+    except Exception as e:
+        logger.warning(f"Error when retrieving training backtrack flag: {e}")
+
     try:
         data = request.data["embeddings"]
         # logger.debug(f"Received data: {data}")
@@ -262,8 +288,7 @@ def handleAggregateRequest(msComm):
     except Exception as e:
         logger.error(f"Errored when deserialising client data: {e}")
 
-    # Hardcoded the number of clients for now
-    data = vfl_server.aggregate_fit(clients_embeddings)
+    data = vfl_server.aggregate_fit(clients_embeddings, backtrack)
 
     ms_config.next_client.ms_comm.send_data(msComm, data, {})
 
