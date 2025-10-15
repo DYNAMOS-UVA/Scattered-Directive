@@ -10,26 +10,98 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
-	"github.com/golang/protobuf/ptypes/timestamp"
+	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opencensus.io/trace"
 )
 
+const (
+    StatusPending = "pending"
+    StatusDone    = "done"
+    StatusFailed  = "failed"
+)
+
+var (
+	activeJobID      string
+	activeJobLock    sync.Mutex   // to allow only 1 active job at any time
+	trainingRequests = sync.Map{} // map[string]TrainingRequestData
+)
+
+type TrainingRequestData struct {
+	Status   string
+	Results  []map[string]any
+	Metadata map[string]any
+	// add more fields as needed
+}
+
+
+func getTrainingStatusHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		logger.Sugar().Info("Starting getTrainingStatusHandler")
+		requestID := r.URL.Query().Get("id")
+		v, ok := trainingRequests.Load(requestID)
+		if !ok {
+			http.Error(w, "Request ID not found", http.StatusNotFound)
+			return
+		}
+
+		logger.Sugar().Debug("Found training request: ", requestID)
+		reqData := v.(TrainingRequestData)
+		resp := map[string]any{
+			"request_id": requestID,
+			"status":     reqData.Status,
+			"metadata":   reqData.Metadata,
+			"results":    reqData.Results,
+		}
+		respBytes, _ := json.MarshalIndent(resp, "", "    ")
+		w.WriteHeader(http.StatusOK)
+		w.Write(respBytes)
+	}
+}
+
 func requestHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		logger.Debug("Starting requestApprovalHandler")
-		// Requests may take up to 10 minutes now
-		ctxWithTimeout, cancel := context.WithTimeout(r.Context(), 60*time.Second)
-		defer cancel()
+		activeJobLock.Lock()
+		defer activeJobLock.Unlock()
 
-		// Start a new span with the context that has a timeout
-		ctx, span := trace.StartSpan(ctxWithTimeout, "requestApprovalHandler")
-		defer span.End()
+		// Check for existing active job
+		if activeJobID != "" {
+			v, _ := trainingRequests.Load(activeJobID)
+			reqData := v.(TrainingRequestData)
+			resp := map[string]any{
+				"error":             "A training job is already in progress.",
+				"active_request_id": activeJobID,
+				"active_status":     reqData.Status,
+			}
+			respBytes, _ := json.Marshal(resp)
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write(respBytes)
+			return
+		}
 
+		// Accept new job
+		requestID := uuid.New().String()
+		activeJobID = requestID
+		reqData := TrainingRequestData{
+			Status: StatusPending,
+			Metadata: map[string]any{
+				"created_at": time.Now().Format(time.RFC3339),
+			},
+			Results: []map[string]any{},
+		}
+		trainingRequests.Store(requestID, reqData)
+
+		resp := map[string]any{
+			"request_id": requestID,
+			"status":     StatusPending,
+		}
+
+		logger.Sugar().Info("Accepted new job with id: ", activeJobID)
+
+		// Parse the request body
 		body, err := api.GetRequestBody(w, r, serviceName)
 		if err != nil {
 			return
@@ -70,61 +142,86 @@ func requestHandler() http.HandlerFunc {
 			Options:          dataRequestOptions.Options,
 		}
 
-		// Create a channel to receive the response
-		responseChan := make(chan validation)
+		respBytes, _ := json.Marshal(resp)
+		w.WriteHeader(http.StatusAccepted)
+		w.Write(respBytes)
 
-		requestApprovalMutex.Lock()
-		requestApprovalMap[protoRequest.User.Id] = responseChan
-		requestApprovalMutex.Unlock()
+		// ---- TRIGGER TRAINING IN BACKGROUND ----
+		go func() {
+			startTraining(protoRequest, dataRequestInterface, apiReqApproval, r, requestID)
+		}()
 
-		_, err = c.SendRequestApproval(ctx, protoRequest)
-		if err != nil {
-			logger.Sugar().Errorf("error in sending requestapproval: %v", err)
+	}
+}
+
+func startTraining(protoRequest *pb.RequestApproval, dataRequestInterface map[string]any, apiReqApproval api.RequestApproval, r *http.Request, requestID string) {
+	logger.Debug("Starting training process...")
+	// Requests may take up to 10 minutes now
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Start a new span with the context that has a timeout
+	ctx, span := trace.StartSpan(ctxWithTimeout, "requestApprovalHandler")
+	defer span.End()
+
+	// Create a channel to receive the response
+	responseChan := make(chan validation)
+
+	requestApprovalMutex.Lock()
+	requestApprovalMap[protoRequest.User.Id] = responseChan
+	requestApprovalMutex.Unlock()
+
+	_, err := c.SendRequestApproval(ctx, protoRequest)
+	if err != nil {
+		logger.Sugar().Errorf("error in sending requestapproval: %v", err)
+	}
+
+	select {
+	case validationStruct := <-responseChan:
+		msg := validationStruct.response
+
+		logger.Sugar().Infof("Received response, %s", msg.Type)
+		if msg.Type != "requestApprovalResponse" {
+			logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
+			// http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
 		}
 
-		select {
-		case validationStruct := <-responseChan:
-			msg := validationStruct.response
+		requestMetadata := &pb.RequestMetadata{
+			JobId: msg.JobId,
+		}
+		dataRequestInterface["requestMetadata"] = requestMetadata
 
-			logger.Sugar().Infof("Received response, %s", msg.Type)
-			if msg.Type != "requestApprovalResponse" {
-				logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
-				http.Error(w, "Internal server error", http.StatusInternalServerError)
+		logger.Sugar().Infof("Data Prepared jsonData: %s", dataRequestInterface)
+
+		var response []byte
+
+		if apiReqApproval.Type == "vflTrainModelRequest" {
+			ctxWithoutCancel := context.WithoutCancel(r.Context())
+			response = runVFLTraining(dataRequestInterface, msg.AuthorizedProviders, msg.JobId, ctxWithoutCancel, requestID)
+
+		} else {
+			// Marshal the combined data back into JSON for forwarding
+			dataRequestJson, err := json.Marshal(dataRequestInterface)
+			if err != nil {
+				logger.Sugar().Errorf("Error marshalling combined data: %v", err)
 				return
 			}
 
-			requestMetadata := &pb.RequestMetadata{
-				JobId: msg.JobId,
-			}
-			dataRequestInterface["requestMetadata"] = requestMetadata
-
-			logger.Sugar().Infof("Data Prepared jsonData: %s", dataRequestInterface)
-
-			var response []byte
-
-			if apiReqApproval.Type == "vflTrainModelRequest" {
-				ctxWithoutCancel := context.WithoutCancel(r.Context())
-				response = runVFLTraining(dataRequestInterface, msg.AuthorizedProviders, msg.JobId, ctxWithoutCancel)
-			} else {
-				// Marshal the combined data back into JSON for forwarding
-				dataRequestJson, err := json.Marshal(dataRequestInterface)
-				if err != nil {
-					logger.Sugar().Errorf("Error marshalling combined data: %v", err)
-					return
-				}
-
-				response = sendDataToAuthProviders(dataRequestJson, msg.AuthorizedProviders, apiReqApproval.Type, msg.JobId)
-			}
-
-			w.WriteHeader(http.StatusOK)
-			w.Write(response)
-			return
-
-		case <-ctx.Done():
-			http.Error(w, "Request timed out", http.StatusRequestTimeout)
-			return
+			response = sendDataToAuthProviders(dataRequestJson, msg.AuthorizedProviders, apiReqApproval.Type, msg.JobId)
 		}
+
+		// w.WriteHeader(http.StatusOK)
+		// w.Write(response)
+		logger.Sugar().Info("Training process completed for request id: ", requestID)
+		logger.Sugar().Info("Response: ", string(response))
+		return
+
+	case <-ctx.Done():
+		// http.Error(w, "Request timed out", http.StatusRequestTimeout)
+		return
 	}
+
 }
 
 func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, serverAuth string, serverUrl string, learning_rate float64, trainingBacktrack int64) (float64, error) {
@@ -206,7 +303,7 @@ func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, 
 	// Prepare data for aggregation
 	dataRequest["type"] = "vflAggregateRequest"
 	dataRequest["data"] = map[string]any{
-		"embeddings": embeddingList,
+		"embeddings":        embeddingList,
 		"trainingBacktrack": trainingBacktrack,
 	}
 
@@ -271,7 +368,7 @@ func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, 
 	return accuracy, nil
 }
 
-func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]string, jobId string, ctx context.Context) []byte {
+func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]string, jobId string, ctx context.Context, requestID string) []byte {
 	clients := map[string]string{}
 	var serverUrl string
 	var serverAuth string
@@ -301,12 +398,12 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			learning_rate = floatLearningRate
 		}
 
-        trainingBacktrackVal, ok := data["training_backtrack"].(float64)
-        if ok {
-            trainingBacktrack = int64(trainingBacktrackVal)
-        } else {
-            logger.Sugar().Debug("training_backtrack not set, defaulting to: ", trainingBacktrack)
-        }
+		trainingBacktrackVal, ok := data["training_backtrack"].(float64)
+		if ok {
+			trainingBacktrack = int64(trainingBacktrackVal)
+		} else {
+			logger.Sugar().Debug("training_backtrack not set, defaulting to: ", trainingBacktrack)
+		}
 
 		policyRemoval, ok := data["policy_removal"].(float64)
 		if ok {
@@ -321,15 +418,17 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 		logger.Sugar().Debug("policy_removal round: ", policy_removal, ", policy_reintroduction round: ", policy_reintroduction)
 	}
 
-    metadata := map[string]any{
-        "total_rounds":      cycles,
-        "policy_removal":    policy_removal,
-        "training_backtrack":         trainingBacktrack,
-        "policy_reintroduction":  policy_reintroduction,
-    }
+	metadata := map[string]any{
+		"total_rounds":          cycles,
+		"policy_removal":        policy_removal,
+		"training_backtrack":    trainingBacktrack,
+		"policy_reintroduction": policy_reintroduction,
+	}
+
 	// logger.Sugar().Debug("metadata: ", metadata)
 
 	var results []map[string]any
+	trainingFailed := false
 
 	for auth, url := range authorizedProviders {
 		if strings.ToLower(auth) == "server" {
@@ -393,8 +492,8 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 	for round := range cycles {
 		logger.Sugar().Info("Running VFL training round ", round)
 
-		numClients := -1  // default value in case of error
-		metadata_accuracy := -1.0  // default value in case of error
+		numClients := -1          // default value in case of error
+		metadata_accuracy := -1.0 // default value in case of error
 
 		// TODO: Implement policy change request
 		if policy_removal == round {
@@ -470,6 +569,7 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			}
 
 			if err == nil {
+				// on success we can continue 
 				break
 			}
 
@@ -480,6 +580,7 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 
 		if noValidation {
 			logger.Sugar().Error("No reverification approval received, error in network. Shutting down operation.")
+			trainingFailed = true
 			break
 		}
 
@@ -492,7 +593,7 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 				logger.Sugar().Errorf("Unexpected message received, type: %s", msg.Type)
 				return []byte{}
 			}
-			
+
 			if msg.Error != "" {
 				logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 				logger.Sugar().Info("   Policy does not allow this training to continue.")
@@ -500,11 +601,10 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 				break
 			}
 
-
 			// logger.Sugar().Debug("AuthorizedProviders from policy response: ", msg.AuthorizedProviders)
 			// logger.Sugar().Debug("AuthorizedProviders originally requested: ", authorizedProviders)
 			// logger.Sugar().Debug("Current clients before sync: ", clients)
-			if len(msg.AuthorizedProviders) != len(authorizedProviders) { 
+			if len(msg.AuthorizedProviders) != len(authorizedProviders) {
 
 				// if len is different I can still allow training to continue with the authorised ones
 				// in that case remove the unauthorised ones from the clients map
@@ -518,10 +618,10 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			}
 
 			// maybe we can merge the above if into this one
-			if len(clients) != len(authorizedProviders) { 
+			if len(clients) != len(authorizedProviders) {
 				// add newly authorised clients that are not yet in the clients map
 				for auth_provider, url := range authorizedProviders {
-					if strings.ToLower(auth_provider) != "server" {  // exclude server 
+					if strings.ToLower(auth_provider) != "server" { // exclude server
 						if _, ok := msg.AuthorizedProviders[auth_provider]; ok {
 							if _, exists := clients[auth_provider]; !exists {
 								logger.Sugar().Debug("Adding newly authorised provider: ", auth_provider, " to the training.")
@@ -534,16 +634,16 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 
 			logger.Sugar().Debug("Clients: ", clients)
 			numClients = len(clients)
-			
 
 			logger.Sugar().Info("- Sending training request")
 			accuracy, err := runVFLTrainingRound(dataRequest, clients, serverAuth, serverUrl, learning_rate, trainingBacktrack)
 			logger.Sugar().Info("- Intermediate accuracy achieved: ", accuracy, " for round ", round)
 			finalAccuracy = accuracy
-			metadata_accuracy = accuracy  // store accuracy from metadata for results
+			metadata_accuracy = accuracy // store accuracy from metadata for results
 
 			if err != nil {
 				logger.Sugar().Error("Training round returned an error.")
+				trainingFailed = true
 				break
 			}
 		}
@@ -555,6 +655,14 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			"clients":     numClients,
 		}
 		results = append(results, result)
+		v, _ := trainingRequests.Load(requestID)
+		reqData := v.(TrainingRequestData)
+		reqData.Results = results
+		trainingRequests.Store(requestID, reqData)
+		
+		if trainingFailed {
+			break
+		}
 
 	}
 
@@ -593,21 +701,40 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 	logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 
 	new_response := map[string]any{
-        "metadata": metadata,
-        "results":  results,
-    }
+		"metadata": metadata,
+		"results":  results,
+	}
 
-    // 4. Marshal and return
-    responseJson, err := json.MarshalIndent(new_response, "", "    ")
-    if err != nil {
-        logger.Sugar().Errorf("Error marshalling training results: %v", err)
-        return []byte{}
-    }
+	// --- SET STATUS and UNLOCK ---
+	v, ok := trainingRequests.Load(requestID)
+	if ok {
+		reqData := v.(TrainingRequestData)
+		reqData.Metadata = metadata
+		if trainingFailed {
+			reqData.Status = StatusFailed
+		} else {
+			reqData.Status = StatusDone
+		}
+		trainingRequests.Store(requestID, reqData)
+		logger.Sugar().Infow("Job completed", "requestID", requestID, "status", reqData.Status, "accuracy", finalAccuracy)
+	} else {
+		logger.Sugar().Error("Could not find the training request to update status.")
+	}
+
+	// Release the active job lock
+	activeJobLock.Lock()
+	activeJobID = ""
+	activeJobLock.Unlock()
+
+	// Marshal and return
+	responseJson, err := json.MarshalIndent(new_response, "", "    ")
+	if err != nil {
+		logger.Sugar().Errorf("Error marshalling training results: %v", err)
+		return []byte{}
+	}
 
 	logger.Sugar().Info("Training results: ", string(responseJson))
-    // return responseJson
-
-	return cleanupAndMarshalResponse(response)
+	return cleanupAndMarshalResponse(response)  // note this is not the same as responseJson
 }
 
 // Use the data request that was previously built and send it to the authorised providers
