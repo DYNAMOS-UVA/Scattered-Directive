@@ -14,6 +14,7 @@ import (
 	"github.com/Jorrit05/DYNAMOS/pkg/api"
 	"github.com/Jorrit05/DYNAMOS/pkg/lib"
 	pb "github.com/Jorrit05/DYNAMOS/pkg/proto"
+	"github.com/golang/protobuf/ptypes/timestamp"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.opencensus.io/trace"
 )
@@ -126,7 +127,7 @@ func requestHandler() http.HandlerFunc {
 	}
 }
 
-func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, serverAuth string, serverUrl string, learning_rate float64) (float64, error) {
+func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, serverAuth string, serverUrl string, learning_rate float64, trainingBacktrack int64) (float64, error) {
 	var wg sync.WaitGroup
 	responses := map[string]string{}
 
@@ -206,6 +207,7 @@ func runVFLTrainingRound(dataRequest map[string]any, clients map[string]string, 
 	dataRequest["type"] = "vflAggregateRequest"
 	dataRequest["data"] = map[string]any{
 		"embeddings": embeddingList,
+		"trainingBacktrack": trainingBacktrack,
 	}
 
 	dataRequestJson, err := json.Marshal(dataRequest)
@@ -282,6 +284,8 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 	var policy_reintroduction int64 = -1
 	var dataProviders []string = []string{}
 
+	var trainingBacktrack int64 = 0 // Default value
+
 	data, ok := dataRequest["data"].(map[string]any)
 	logger.Sugar().Info("Data from req: ", data)
 
@@ -297,6 +301,13 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			learning_rate = floatLearningRate
 		}
 
+        trainingBacktrackVal, ok := data["training_backtrack"].(float64)
+        if ok {
+            trainingBacktrack = int64(trainingBacktrackVal)
+        } else {
+            logger.Sugar().Debug("training_backtrack not set, defaulting to: ", trainingBacktrack)
+        }
+
 		policyRemoval, ok := data["policy_removal"].(float64)
 		if ok {
 			policy_removal = int64(policyRemoval)
@@ -309,6 +320,16 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 
 		logger.Sugar().Debug("policy_removal round: ", policy_removal, ", policy_reintroduction round: ", policy_reintroduction)
 	}
+
+    metadata := map[string]any{
+        "total_rounds":      cycles,
+        "policy_removal":    policy_removal,
+        "training_backtrack":         trainingBacktrack,
+        "policy_reintroduction":  policy_reintroduction,
+    }
+	// logger.Sugar().Debug("metadata: ", metadata)
+
+	var results []map[string]any
 
 	for auth, url := range authorizedProviders {
 		if strings.ToLower(auth) == "server" {
@@ -371,6 +392,9 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 	logger.Sugar().Info("Running VFL for ", cycles, " rounds")
 	for round := range cycles {
 		logger.Sugar().Info("Running VFL training round ", round)
+
+		numClients := -1  // default value in case of error
+		metadata_accuracy := -1.0  // default value in case of error
 
 		// TODO: Implement policy change request
 		if policy_removal == round {
@@ -509,19 +533,29 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 			}
 
 			logger.Sugar().Debug("Clients: ", clients)
+			numClients = len(clients)
 			
 
 			logger.Sugar().Info("- Sending training request")
-			accuracy, err := runVFLTrainingRound(dataRequest, clients, serverAuth, serverUrl, learning_rate)
+			accuracy, err := runVFLTrainingRound(dataRequest, clients, serverAuth, serverUrl, learning_rate, trainingBacktrack)
 			logger.Sugar().Info("- Intermediate accuracy achieved: ", accuracy, " for round ", round)
 			finalAccuracy = accuracy
+			metadata_accuracy = accuracy  // store accuracy from metadata for results
 
 			if err != nil {
 				logger.Sugar().Error("Training round returned an error.")
 				break
 			}
-			// default:
 		}
+
+		result := map[string]any{
+			"timestamp":   time.Now().Format(time.RFC3339),
+			"train_round": round,
+			"accuracy":    metadata_accuracy,
+			"clients":     numClients,
+		}
+		results = append(results, result)
+
 	}
 
 	logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
@@ -557,6 +591,21 @@ func runVFLTraining(dataRequest map[string]any, authorizedProviders map[string]s
 	logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
 	logger.Sugar().Info("Final accuracy achieved: ", finalAccuracy)
 	logger.Sugar().Info("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-")
+
+	new_response := map[string]any{
+        "metadata": metadata,
+        "results":  results,
+    }
+
+    // 4. Marshal and return
+    responseJson, err := json.MarshalIndent(new_response, "", "    ")
+    if err != nil {
+        logger.Sugar().Errorf("Error marshalling training results: %v", err)
+        return []byte{}
+    }
+
+	logger.Sugar().Info("Training results: ", string(responseJson))
+    // return responseJson
 
 	return cleanupAndMarshalResponse(response)
 }
